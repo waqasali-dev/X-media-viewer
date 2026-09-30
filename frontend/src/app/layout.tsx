@@ -18,9 +18,6 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
-      <head>
-        <meta name="referrer" content="no-referrer" />
-      </head>
       <body className="bg-neutral-950 text-neutral-100 antialiased" suppressHydrationWarning>
         {children}
       </body>
