@@ -1,29 +1,30 @@
 # X Media Archive — High-Performance Media Stream Gallery
 
-Discover, stream, and archive **every photo, video, and animated GIF** an X.com (Twitter) profile has ever posted without official API limits. Features an infinite-scroll virtualized masonry gallery, HLS/MP4 video playback, multi-account session rotation, and one-click quality downloads.
+Discover, stream, and archive **every photo, video, and animated GIF** an X.com (Twitter) profile has ever posted without official API limits. Features an infinite-scroll virtualized masonry gallery, HLS/MP4 video playback, private browser-cached session rotation, and one-click quality downloads.
 
 ---
 
 ## Architecture
 
-The project is decoupled into two independent services:
+The project is decoupled into two independent standalone services:
 
 ```
 x-profile-media-archive/
 ├── backend/            # Express server (Deploy to Render)
-│   ├── src/            # SSE streaming, GraphQL timeline client, session & in-memory media cache
-│   ├── cookies.json    # Local cookie persistence
-│   ├── render.yaml     # Render Blueprint
-│   └── package.json
+│   ├── src/            # SSE streaming, GraphQL timeline client, in-memory cache & media proxy
+│   ├── package.json
+│   └── tsconfig.json
 ├── frontend/           # Next.js 16 & React 19 App (Deploy to Vercel)
-│   ├── src/            # Gallery UI, VideoPlayer, Lightbox, SessionManager
+│   ├── src/            # Gallery UI, VideoPlayer, Lightbox, Private Session Store
 │   ├── vercel.json     # Vercel configuration
 │   └── package.json
-└── start.bat           # One-click Windows local launcher
+├── render.yaml         # Render Blueprint specification
+├── start.bat           # One-click Windows local launcher
+└── README.md
 ```
 
-- **Zero Database**: Operates completely in-memory with automatic session persistence to `cookies.json`. No PostgreSQL or SQL database required!
-- **Session Pool & Cache**: Automatically rotates multiple X accounts (`auth_token` + `ct0`) to evade rate limits with 429 backoff handling.
+- **Zero Database & Zero Disk Storage**: Operates completely in-memory with request-scoped sessions. No PostgreSQL or database required!
+- **Private Browser Cache**: User credentials (`auth_token` + `ct0`) are saved strictly in the user's private browser `localStorage`. No cookies are ever saved on the server or shared with other visitors.
 - **Video & CDN Proxy**: Proxies media through `/api/download` with HTTP Range requests, enabling smooth seekable video streaming and quality selection.
 
 ---
@@ -59,41 +60,53 @@ npm run dev
 
 ## Deployment Guide
 
-### Deploy Backend on Render
+### 1. Deploy Backend on Render
 
-1. Create a new **Web Service** on [Render](https://render.com).
+#### Option A: 1-Click Render Blueprint (Recommended)
+1. In [Render Dashboard](https://dashboard.render.com), click **New +** → **Blueprint**.
 2. Connect your Git repository.
-3. Configure the service settings:
+3. Render automatically detects `render.yaml` at the root and configures the service:
    - **Root Directory**: `backend`
    - **Runtime**: `Node`
    - **Build Command**: `npm install && npm run build`
    - **Start Command**: `npm start`
-4. Set Environment Variables (optional):
-   - `X_COOKIES_JSON`: `[{"label":"burner-1","auth_token":"...","ct0":"..."}]`
+   - **Health Check Path**: `/api/health`
+4. Click **Apply**.
+5. Once deployed, copy your service URL (e.g. `https://x-media-archive-backend.onrender.com`).
+
+#### Option B: Manual Web Service on Render
+1. Click **New +** → **Web Service**.
+2. Connect your repository.
+3. Settings:
+   - **Root Directory**: `backend`
+   - **Environment**: `Node`
+   - **Build Command**: `npm install && npm run build`
+   - **Start Command**: `npm start`
+   - **Plan**: Free
+4. Add Environment Variables:
+   - `PORT`: `10000`
+   - `NODE_ENV`: `production`
    - `X_SCRAPER_MODE`: `auto`
-5. Note your assigned Render URL (e.g. `https://x-media-archive-backend.onrender.com`).
-
-*(Alternatively, use Render Blueprints with `backend/render.yaml` for 1-click infrastructure deployment.)*
 
 ---
 
-### Deploy Frontend on Vercel
+### 2. Deploy Frontend on Vercel
 
-1. Import your Git repository into [Vercel](https://vercel.com).
-2. Set the **Root Directory** to `frontend`.
-3. Under **Environment Variables**, add:
-   - `NEXT_PUBLIC_BACKEND_URL` = `https://x-media-archive-backend.onrender.com` (your Render backend URL)
-4. Click **Deploy**.
+1. Go to [Vercel Dashboard](https://vercel.com) and click **Add New...** → **Project**.
+2. Import your Git repository.
+3. Configure Project Settings:
+   - **Framework Preset**: `Next.js`
+   - **Root Directory**: Click **Edit** and select `frontend`.
+4. Configure Environment Variables:
+   - Key: `NEXT_PUBLIC_BACKEND_URL`
+   - Value: `https://x-media-archive-backend.onrender.com` *(replace with your Render backend URL)*
+5. Click **Deploy**.
 
 ---
 
-## Session Configuration
+## Connecting Frontend to Backend
 
-To scrape timelines, configure at least one active X session:
-
-1. Log into **https://x.com** in your browser.
-2. Open DevTools (`F12`) → **Application** (or **Storage**) → **Cookies** → `https://x.com`.
-3. Copy:
-   - `auth_token` (40-char hex string)
-   - `ct0` (CSRF token string)
-4. Add it through the in-app **Sessions** modal (`http://localhost:3000`), or add it to `backend/cookies.json`.
+When your frontend loads in the browser:
+- `NEXT_PUBLIC_BACKEND_URL` tells the frontend where the Render backend lives.
+- All requests (SSE media stream, CDN proxy, profiles) connect directly to Render with full CORS support.
+- Each visitor saves their own X credentials (`auth_token` and `ct0`) in their private browser cache via the top-bar **Sessions** modal.
