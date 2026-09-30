@@ -16,6 +16,7 @@ import {
   getSessionOverview,
   resetSession,
   syncExternalSessions,
+  type UserSessionInput,
 } from "./lib/x/session-cache.js";
 import type { MediaType } from "./lib/x/types.js";
 
@@ -27,7 +28,16 @@ app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
-    allowedHeaders: ["Range", "Accept", "Content-Type", "Origin", "Authorization"],
+    allowedHeaders: [
+      "Range",
+      "Accept",
+      "Content-Type",
+      "Origin",
+      "Authorization",
+      "X-Session-Tokens",
+      "X-Auth-Token",
+      "X-Ct0",
+    ],
     exposedHeaders: [
       "Content-Range",
       "Accept-Ranges",
@@ -41,7 +51,7 @@ app.use(
 app.use(express.json());
 
 // Initial session sync on startup
-void syncExternalSessions(true).then((count) => {
+void syncExternalSessions().then((count) => {
   console.log(`[backend] Loaded ${count} initial X sessions into cache`);
 });
 
@@ -58,23 +68,88 @@ app.get("/api/health", (_req: Request, res: Response) => {
   });
 });
 
+function parseClientSessions(req: Request): UserSessionInput[] {
+  const list: UserSessionInput[] = [];
+
+  // 1. From request body (POST)
+  if (req.body && typeof req.body === "object") {
+    if (Array.isArray(req.body.sessions)) {
+      list.push(...req.body.sessions);
+    } else if (req.body.auth_token && req.body.ct0) {
+      list.push({ auth_token: req.body.auth_token, ct0: req.body.ct0, label: req.body.label });
+    }
+  }
+
+  // 2. From header x-session-tokens
+  const headerTokens = req.headers["x-session-tokens"];
+  if (typeof headerTokens === "string" && headerTokens.trim()) {
+    try {
+      const decoded = Buffer.from(headerTokens, "base64").toString("utf-8");
+      const parsed = JSON.parse(decoded);
+      if (Array.isArray(parsed)) list.push(...parsed);
+      else if (parsed && typeof parsed === "object") list.push(parsed);
+    } catch {
+      try {
+        const parsed = JSON.parse(headerTokens);
+        if (Array.isArray(parsed)) list.push(...parsed);
+        else if (parsed && typeof parsed === "object") list.push(parsed);
+      } catch {}
+    }
+  }
+
+  // 3. From query param: session or sessions
+  const querySession = (req.query.session || req.query.sessions)?.toString();
+  if (querySession && querySession.trim()) {
+    try {
+      const decoded = Buffer.from(querySession, "base64").toString("utf-8");
+      const parsed = JSON.parse(decoded);
+      if (Array.isArray(parsed)) list.push(...parsed);
+      else if (parsed && typeof parsed === "object") list.push(parsed);
+    } catch {
+      try {
+        const parsed = JSON.parse(decodeURIComponent(querySession));
+        if (Array.isArray(parsed)) list.push(...parsed);
+        else if (parsed && typeof parsed === "object") list.push(parsed);
+      } catch {}
+    }
+  }
+
+  // 4. From direct auth_token & ct0 params
+  const directAuth = (req.query.auth_token || req.headers["x-auth-token"])?.toString();
+  const directCt0 = (req.query.ct0 || req.headers["x-ct0"])?.toString();
+  if (directAuth && directCt0) {
+    list.push({ auth_token: directAuth, ct0: directCt0, label: "Client Session" });
+  }
+
+  return list;
+}
+
 /**
  * Server-Sent Events (SSE) Stream Endpoint
  * GET /api/stream?username=<handle|url>[&mode=auto|graphql|playwright][&full=1]
- * GET /api/stream/:username
+ * POST /api/stream (body: { username, mode, full, sessions })
  */
-app.get(["/api/stream", "/api/stream/:username"], async (req: Request, res: Response) => {
-  const username = (req.params.username || req.query.username || req.query.u || "").toString();
+app.all(["/api/stream", "/api/stream/:username"], async (req: Request, res: Response) => {
+  const username = (
+    req.params.username ||
+    req.query.username ||
+    req.query.u ||
+    req.body?.username ||
+    ""
+  ).toString();
 
   if (!username) {
     res.status(400).json({ error: "Missing username parameter" });
     return;
   }
 
-  const modeParam = req.query.mode?.toString();
+  const modeParam = (req.query.mode || req.body?.mode)?.toString();
   const mode: ScraperMode | undefined =
     modeParam === "graphql" || modeParam === "playwright" || modeParam === "auto" ? modeParam : undefined;
-  const full = req.query.full === "1" || req.query.full === "true";
+  const full = req.query.full === "1" || req.query.full === "true" || req.body?.full === true;
+
+  // Extract client sessions passed from the user's private browser cache
+  const clientSessions = parseClientSessions(req);
 
   // Setup SSE Headers
   res.writeHead(200, {
@@ -110,6 +185,7 @@ app.get(["/api/stream", "/api/stream/:username"], async (req: Request, res: Resp
       signal: abort.signal,
       mode,
       full,
+      sessions: clientSessions.length > 0 ? clientSessions : undefined,
     })) {
       if (abort.signal.aborted || res.writableEnded) break;
       sendEvent(event);
@@ -127,6 +203,7 @@ app.get(["/api/stream", "/api/stream/:username"], async (req: Request, res: Resp
     }
   }
 });
+
 
 const EXT_BY_MIME: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -365,14 +442,14 @@ app.get("/api/sessions", async (_req: Request, res: Response) => {
  * POST /api/sessions
  *   { label?, auth_token, ct0 }            → add / update a session
  *   { cookie_string }                      → parse a pasted cookie header
- *   { action: "import" }                   → re-import cookies.json / env
+ *   { action: "import" }                   → re-import env credentials
  *   { action: "reset", id }                → clear cooldown / invalid flag
  */
 app.post("/api/sessions", async (req: Request, res: Response) => {
   try {
     const body = req.body || {};
     if (body.action === "import") {
-      const imported = await syncExternalSessions(true);
+      const imported = await syncExternalSessions();
       const overview = await getSessionOverview();
       res.json({ imported, ...overview });
       return;
@@ -411,6 +488,11 @@ app.post("/api/sessions", async (req: Request, res: Response) => {
       ct0,
       userAgent: typeof body.user_agent === "string" ? body.user_agent : undefined,
     });
+
+    if (!session) {
+      res.status(400).json({ error: "Failed to add session with provided credentials." });
+      return;
+    }
 
     const overview = await getSessionOverview();
     res.json({ added: session.id, ...overview });

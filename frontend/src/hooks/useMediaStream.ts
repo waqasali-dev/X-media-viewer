@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MediaItem, ProfileState, StreamEvent, StreamStatus } from "@/lib/x/types";
 import { getApiUrl } from "@/lib/api-client";
+import { getClientSessions } from "@/lib/session-store";
 
 export interface StreamState {
   handle: string | null;
@@ -182,6 +183,23 @@ export function useMediaStream() {
       const params = new URLSearchParams({ username: handle });
       if (opts.mode) params.set("mode", opts.mode);
       if (opts.full) params.set("full", "1");
+
+      // Attach sessions from the user's private browser cache (never shared on server)
+      const userSessions = getClientSessions();
+      if (userSessions.length > 0) {
+        const payload = userSessions.map((s) => ({
+          label: s.label,
+          auth_token: s.authToken,
+          ct0: s.ct0,
+          user_agent: s.userAgent,
+        }));
+        try {
+          params.set("session", btoa(JSON.stringify(payload)));
+        } catch {
+          params.set("session", encodeURIComponent(JSON.stringify(payload)));
+        }
+      }
+
       const streamUrl = getApiUrl(`/api/stream?${params.toString()}`);
       const es = new EventSource(streamUrl);
       sourceRef.current = es;

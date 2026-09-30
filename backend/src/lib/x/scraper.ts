@@ -20,7 +20,14 @@ import {
   saveProfileInfo,
   updateScrapeState,
 } from "./cache-repository.js";
-import { acquireSession, countUsableSessions, markUsed } from "./session-cache.js";
+import {
+  acquireSession,
+  countUsableSessions,
+  createSessionPool,
+  markUsed,
+  SessionPool,
+  type UserSessionInput,
+} from "./session-cache.js";
 import type { ProfileInfo, StreamEvent } from "./types.js";
 
 export type ScraperMode = "auto" | "graphql" | "playwright";
@@ -29,6 +36,7 @@ export interface ScrapeOptions {
   signal?: AbortSignal;
   mode?: ScraperMode;
   full?: boolean;
+  sessions?: UserSessionInput[];
 }
 
 interface PassResult {
@@ -58,6 +66,10 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
   const handle: string = normalized;
   const mode: ScraperMode = opts.mode ?? ((process.env.X_SCRAPER_MODE as ScraperMode) || "auto");
 
+  // Create isolated in-memory session pool for this specific scrape request
+  const customPool: SessionPool | undefined =
+    opts.sessions && opts.sessions.length > 0 ? createSessionPool(opts.sessions) : undefined;
+
   /* ---------- Step 1: cache check ---------- */
   yield { type: "status", status: "checking_cache", message: `Looking up @${handle} in the local archive…` };
   let profile = await ensureProfile(handle);
@@ -75,14 +87,14 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
   }
 
   /* ---------- Step 2: sessions ---------- */
-  const sessions = await countUsableSessions();
+  const sessions = await countUsableSessions(customPool);
   if (sessions.total === 0) {
     yield {
       type: "error",
       code: "no_sessions",
       message: hadCache
-        ? "Showing the cached archive. Add an X session (auth_token + ct0) in Settings to fetch new posts."
-        : "No X sessions configured. Open Settings and paste an auth_token + ct0 cookie pair to start scraping.",
+        ? "Showing cached archive. Add your X cookies (auth_token + ct0) in Settings to fetch new posts."
+        : "No X session provided. Open Settings in the top bar and add your auth_token + ct0 cookies to stream.",
     };
     return;
   }
@@ -97,6 +109,7 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
         fieldToggles: USER_FIELD_TOGGLES,
         signal,
         referer: `https://x.com/${handle}`,
+        sessionPool: customPool,
       });
       const lookup = parseUserResult(json);
       if (!lookup.ok) {
@@ -105,7 +118,7 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
       }
       info = lookup.profile;
     } catch (err) {
-      const handled = yield* handleRequestError(err, ++failures, signal);
+      const handled = yield* handleRequestError(err, ++failures, signal, customPool);
       if (!handled) {
         if (profile.userId && mode !== "graphql") break;
         yield { type: "error", code: err instanceof NoSessionError ? "no_sessions" : "resolve_failed", message: (err as Error).message };
@@ -169,12 +182,16 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
 
       let parsed: ParsedPage;
       try {
-        const { json } = await gqlRequest("UserMedia", variables, { signal, referer: `https://x.com/${handle}/media` });
+        const { json } = await gqlRequest("UserMedia", variables, {
+          signal,
+          referer: `https://x.com/${handle}/media`,
+          sessionPool: customPool,
+        });
         parsed = parseUserMediaPage(json, handle);
         consecutiveFailures = 0;
       } catch (err) {
         if (signal?.aborted) return { reachedEnd: false, stoppedEarly: false, interrupted: true };
-        const handled = yield* handleRequestError(err, ++consecutiveFailures, signal);
+        const handled = yield* handleRequestError(err, ++consecutiveFailures, signal, customPool);
         if (!handled) throw err;
         continue;
       }
@@ -205,9 +222,9 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
   }
 
   async function* playwrightPass(stopWhenNoNew: boolean): AsyncGenerator<StreamEvent, PassResult> {
-    const { session, waitSeconds, total: totalSessions } = await acquireSession();
+    const { session, waitSeconds, total: totalSessions } = await acquireSession([], customPool);
     if (!session) throw new NoSessionError(waitSeconds, totalSessions);
-    await markUsed(session.id);
+    await markUsed(session.id, undefined, customPool);
     yield { type: "status", status: "scraping", mode: "playwright", message: "Headless Chromium is scrolling the media tab and intercepting UserMedia payloads…" };
     let staleStreak = 0;
     let sawCursor = true;
@@ -218,25 +235,23 @@ export async function* scrapeProfileMedia(rawHandle: string, opts: ScrapeOptions
       const newCount = events.find((e) => e.type === "media")?.items.length ?? 0;
       sawCursor = Boolean(parsed.bottomCursor);
       staleStreak = newCount === 0 && parsed.items.length > 0 ? staleStreak + 1 : 0;
-      if (stopWhenNoNew && staleStreak >= 2) return { reachedEnd: false, stoppedEarly: true, interrupted: false };
-      if (!sawCursor) return { reachedEnd: true, stoppedEarly: false, interrupted: false };
+      if (stopWhenNoNew && staleStreak >= 2) {
+        return { reachedEnd: false, stoppedEarly: true, interrupted: false };
+      }
     }
-    if (signal?.aborted) return { reachedEnd: false, stoppedEarly: false, interrupted: true };
     return { reachedEnd: !sawCursor, stoppedEarly: false, interrupted: false };
   }
 
   const finish = async (result: PassResult, liveMode: "graphql" | "playwright"): Promise<StreamEvent> => {
-    if (result.reachedEnd) {
-      state.fullyScraped = true;
-      await updateScrapeState(profile.id, { fullyScraped: true, resumeCursor: null, lastError: null });
-    }
     const finalTotal = await refreshTotals(profile.id);
-    const message = result.interrupted
-      ? "Stream interrupted – progress saved, reopen the profile to resume."
-      : state.fullyScraped
-        ? `Archive complete via ${liveMode}: ${finalTotal.toLocaleString()} media items from the account's first post to now.`
-        : `Caught up: ${finalTotal.toLocaleString()} items archived.`;
-    return { type: "done", total: finalTotal, fully_scraped: state.fullyScraped, message };
+    const fully = result.reachedEnd || (state.fullyScraped && !opts.full);
+    await updateScrapeState(profile.id, { fullyScraped: fully });
+    const msg = fully
+      ? `Full archive complete. Captured ${finalTotal.toLocaleString()} items.`
+      : result.stoppedEarly
+      ? `Caught up to existing archive (${finalTotal.toLocaleString()} total items).`
+      : `Paused with ${finalTotal.toLocaleString()} items cached. Run again anytime to continue.`;
+    return { type: "done", total: finalTotal, fully_scraped: fully, message: msg };
   };
 
   try {
@@ -283,11 +298,16 @@ function shouldFallbackToPlaywright(err: unknown): boolean {
   return err instanceof Error && !(err instanceof RateLimitError);
 }
 
-async function* handleRequestError(err: unknown, failures: number, signal?: AbortSignal): AsyncGenerator<StreamEvent, boolean> {
+async function* handleRequestError(
+  err: unknown,
+  failures: number,
+  signal?: AbortSignal,
+  customPool?: SessionPool,
+): AsyncGenerator<StreamEvent, boolean> {
   if (failures > MAX_CONSECUTIVE_FAILURES) return false;
 
   if (err instanceof RateLimitError) {
-    const { session, waitSeconds } = await acquireSession();
+    const { session, waitSeconds } = await acquireSession([], customPool);
     if (session) {
       yield { type: "status", status: "scraping", message: `Session #${err.sessionId} hit a 429 – rotated to "${session.label}".` };
       await sleep(randomBetween(800, 1600), signal);

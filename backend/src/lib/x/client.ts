@@ -7,7 +7,7 @@ import {
   RATE_LIMIT_COOLDOWN_SECONDS,
   type OperationName,
 } from "./constants.js";
-import { acquireSession, markInvalid, markRateLimited, markUsed } from "./session-cache.js";
+import { acquireSession, markInvalid, markRateLimited, markUsed, type SessionPool } from "./session-cache.js";
 import type { SessionCookie } from "./types.js";
 
 export class RateLimitError extends Error {
@@ -37,7 +37,7 @@ export class NoSessionError extends Error {
   ) {
     super(
       total === 0
-        ? "No X sessions configured. Add an auth_token + ct0 cookie pair in Settings (or cookies.json)."
+        ? "No X session provided. Add your auth_token + ct0 cookies in Settings (stored privately in your browser cache)."
         : `All ${total} sessions are cooling down or invalid.`,
     );
     this.name = "NoSessionError";
@@ -125,11 +125,12 @@ export async function refreshOperationIds(force = false): Promise<boolean> {
 
 const learnedFeatures: Record<string, boolean> = {};
 
-interface GqlOptions {
+export interface GqlOptions {
   fieldToggles?: Record<string, unknown>;
   signal?: AbortSignal;
   excludeSessions?: number[];
   referer?: string;
+  sessionPool?: SessionPool;
 }
 
 export interface GqlResult<T = unknown> {
@@ -188,7 +189,7 @@ export async function gqlRequest<T = unknown>(
   variables: Record<string, unknown>,
   opts: GqlOptions = {},
 ): Promise<GqlResult<T>> {
-  const { session, waitSeconds, total } = await acquireSession(opts.excludeSessions);
+  const { session, waitSeconds, total } = await acquireSession(opts.excludeSessions, opts.sessionPool);
   if (!session) throw new NoSessionError(waitSeconds, total);
 
   let features: Record<string, boolean> = { ...GQL_FEATURES, ...learnedFeatures };
@@ -222,7 +223,7 @@ export async function gqlRequest<T = unknown>(
           ? resetAt
           : new Date(Date.now() + RATE_LIMIT_COOLDOWN_SECONDS * 1000);
       const wait = Math.max(RATE_LIMIT_COOLDOWN_SECONDS, Math.ceil((until.getTime() - Date.now()) / 1000));
-      await markRateLimited(session.id, until, `HTTP 429 on ${op}`);
+      await markRateLimited(session.id, until, `HTTP 429 on ${op}`, opts.sessionPool);
       throw new RateLimitError(session.id, wait);
     }
 
@@ -239,11 +240,11 @@ export async function gqlRequest<T = unknown>(
       const csrfMismatch = errors.some((e) => e.code === 353) || /csrf/i.test(bodyText);
       if (csrfMismatch && freshCt0 && !retriedCsrf) {
         retriedCsrf = true;
-        await markUsed(session.id, freshCt0);
+        await markUsed(session.id, freshCt0, opts.sessionPool);
         continue;
       }
       const reason = errors[0]?.message || `HTTP ${res.status} on ${op}`;
-      await markInvalid(session.id, reason);
+      await markInvalid(session.id, reason, opts.sessionPool);
       throw new SessionInvalidError(session.id, `Session "${session.label}" rejected by X: ${reason}`);
     }
 
@@ -275,14 +276,14 @@ export async function gqlRequest<T = unknown>(
 
     const fatal = errors.find((e) => [32, 64, 326, 353].includes(e.code ?? -1));
     if (fatal && !(json as { data?: unknown })?.data) {
-      await markInvalid(session.id, fatal.message);
+      await markInvalid(session.id, fatal.message, opts.sessionPool);
       throw new SessionInvalidError(session.id, `Session "${session.label}" rejected by X: ${fatal.message}`);
     }
 
     if (remaining === 0 && resetAt) {
-      await markRateLimited(session.id, resetAt, `Quota exhausted on ${op}`);
+      await markRateLimited(session.id, resetAt, `Quota exhausted on ${op}`, opts.sessionPool);
     } else {
-      await markUsed(session.id, freshCt0 && freshCt0 !== session.ct0 ? freshCt0 : undefined);
+      await markUsed(session.id, freshCt0 && freshCt0 !== session.ct0 ? freshCt0 : undefined, opts.sessionPool);
     }
     return { json: json as T, session, rateLimitRemaining: remaining };
   }

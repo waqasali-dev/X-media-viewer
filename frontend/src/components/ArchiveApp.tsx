@@ -32,10 +32,10 @@ import { MediaGrid } from "./MediaGrid";
 import { Lightbox } from "./Lightbox";
 import { SessionManager } from "./SessionManager";
 
+import { getClientSessions } from "@/lib/session-store";
+
 interface Counts {
   active: number;
-  cooldown: number;
-  invalid: number;
   total: number;
 }
 
@@ -52,12 +52,12 @@ export function ArchiveApp() {
   const [recent, setRecent] = useState<ProfileState[]>([]);
 
   const refreshMeta = useCallback(async () => {
+    // Read private session cache directly from user's browser
+    const userSessions = getClientSessions();
+    setCounts({ active: userSessions.length, total: userSessions.length });
+
     try {
-      const [s, p] = await Promise.all([
-        fetch(getApiUrl("/api/sessions")).then((r) => r.json()),
-        fetch(getApiUrl("/api/profiles")).then((r) => r.json()),
-      ]);
-      if (s.counts) setCounts(s.counts);
+      const p = await fetch(getApiUrl("/api/profiles")).then((r) => r.json());
       if (p.profiles) setRecent(p.profiles);
     } catch {
       /* offline */
@@ -66,6 +66,13 @@ export function ArchiveApp() {
 
   useEffect(() => {
     void refreshMeta();
+    const handleUpdate = () => refreshMeta();
+    window.addEventListener("x_sessions_updated", handleUpdate);
+    window.addEventListener("storage", handleUpdate);
+    return () => {
+      window.removeEventListener("x_sessions_updated", handleUpdate);
+      window.removeEventListener("storage", handleUpdate);
+    };
   }, [refreshMeta]);
 
   useEffect(() => {
@@ -198,7 +205,7 @@ export function ArchiveApp() {
                 ? "border-amber-400/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 shadow-lg shadow-amber-500/10"
                 : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10"
             }`}
-            title="Manage cookie session pool"
+            title="Your private session cache (stored in browser only)"
           >
             {noSessions ? (
               <>
@@ -209,7 +216,7 @@ export function ArchiveApp() {
               <>
                 <Settings size={16} />
                 <span className="hidden sm:inline">
-                  Sessions ({counts?.active ?? 0}/{counts?.total ?? 0})
+                  Sessions ({counts?.active ?? 0})
                 </span>
                 <span className={`h-2 w-2 rounded-full ${counts?.active ? "bg-emerald-400" : "bg-neutral-500"}`} />
               </>
