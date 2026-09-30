@@ -127,14 +127,7 @@ export function ArchiveApp() {
   const busy = state.isStreaming;
 
   if (!mounted) {
-    return (
-      <div className="min-h-screen bg-neutral-950 text-neutral-100 flex items-center justify-center" suppressHydrationWarning>
-        <div className="flex flex-col items-center gap-3" suppressHydrationWarning>
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
-          <span className="text-xs text-neutral-400">Loading X Media Archive…</span>
-        </div>
-      </div>
-    );
+    return null;
   }
 
   return (
