@@ -1,6 +1,12 @@
 @echo off
-echo Starting PostgreSQL cluster on port 5433...
-"D:\Postgress\bin\pg_ctl.exe" -D "D:\pg_x_media_archive_db" -o "-p 5433" start
+echo ========================================================
+echo Starting X Media Archive
+echo Backend:  http://localhost:4000
+echo Frontend: http://localhost:3000
+echo ========================================================
+
+start "X Archive Backend (Port 4000)" cmd /k "cd /d %~dp0backend && npm run dev"
 timeout /t 2 /nobreak >nul
-echo Starting X Media Archive App on http://localhost:3000 ...
-npm run dev
+start "X Archive Frontend (Port 3000)" cmd /k "cd /d %~dp0frontend && npm run dev"
+
+echo Both services launched in separate terminal windows.
