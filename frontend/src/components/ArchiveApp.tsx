@@ -42,6 +42,7 @@ interface Counts {
 const SAMPLE_HANDLES = ["nasa", "spacex", "nature", "natgeo"];
 
 export function ArchiveApp() {
+  const [mounted, setMounted] = useState(false);
   const { state, start, stop } = useMediaStream();
   const [input, setInput] = useState("");
   const [filter, setFilter] = useState<MediaFilter>("all");
@@ -50,6 +51,10 @@ export function ArchiveApp() {
   const [showSessions, setShowSessions] = useState(false);
   const [counts, setCounts] = useState<Counts | null>(null);
   const [recent, setRecent] = useState<ProfileState[]>([]);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const refreshMeta = useCallback(async () => {
     // Read private session cache directly from user's browser
@@ -121,8 +126,19 @@ export function ArchiveApp() {
   const noSessions = counts !== null && counts.total === 0;
   const busy = state.isStreaming;
 
+  if (!mounted) {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-100 flex items-center justify-center" suppressHydrationWarning>
+        <div className="flex flex-col items-center gap-3" suppressHydrationWarning>
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+          <span className="text-xs text-neutral-400">Loading X Media Archive…</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 selection:bg-sky-500 selection:text-white">
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 selection:bg-sky-500 selection:text-white" suppressHydrationWarning>
       {/* ---------------- Header ---------------- */}
       <header className="sticky top-0 z-40 border-b border-white/10 bg-neutral-950/85 backdrop-blur-xl">
         <div className="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
