@@ -1,0 +1,6 @@
+@echo off
+echo Starting PostgreSQL cluster on port 5433...
+"D:\Postgress\bin\pg_ctl.exe" -D "D:\pg_x_media_archive_db" -o "-p 5433" start
+timeout /t 2 /nobreak >nul
+echo Starting X Media Archive App on http://localhost:3000 ...
+npm run dev
